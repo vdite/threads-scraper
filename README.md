@@ -32,7 +32,7 @@ While other tools only see the surface, this scraper dives deep into the discuss
 1. **Clone the repository:**
 ```bash
 git clone https://github.com/vdite/threads-scraper.git
-cd threads-recursive-scraper
+cd threads-scraper
 
 ```
 
