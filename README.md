@@ -18,14 +18,14 @@ Meta's architecture loads replies lazily via GraphQL. If you only scrape the ini
 2. Install the required dependencies:
    ```bash
    pip install playwright parsel nested-lookup jmespath
-   ´´´
+   ```
 3. Install the Chromium browser for Playwright:
    ```bash
    python3 -m playwright install chromium
-   ´´´
+   ```
 
 ## Usage
 Simply run the script and provide a Threads URL as an argument:
 ```bash   
 python3 threads_scraper.py https://www.threads.net/@user/post/CODE
-´´´
+```
