@@ -33,45 +33,93 @@ While other tools only see the surface, this scraper dives deep into the discuss
 ```bash
 git clone https://github.com/vdite/threads-scraper.git
 cd threads-scraper
-
 ```
 
 2. **Install dependencies:**
 ```bash
 pip install playwright parsel nested-lookup jmespath
-
 ```
 
 3. **Setup Playwright:**
 ```bash
 python3 -m playwright install chromium
-
 ```
 
 
 ## 📖 Usage
 
+There are two versions of the scraper. Choose the one that fits your needs:
+
+### Version 1: Basic (no login required)
+
 Start the scraper by providing any Threads URL as a command-line argument:
 
 ```bash
 python3 threads_scraper.py https://www.threads.net/@user/post/CODE
-
 ```
 
-### Output
-The threads scraper gives you a json formatted output 
+Output is printed as JSON to stdout.
 
-### Extracted Data Fields:
+> **Note:** Without login, Threads limits the visible comments to roughly 20 top-level threads (~45-50 posts total including sub-replies). The page literally says *"Log in to see more replies."* at the bottom.
 
-The scraper captures the following information for every post and reply:
+---
 
-* `author`: Username of the creator.
-* `text`: The full content of the post/comment.
-* `likes`: Number of likes.
-* `reply_count`: Number of sub-replies.
-* `code`: The unique identifier used for recursive crawling.
+### Version 2: Enhanced with Login (`threads_scraper_v2.py`)
+
+This version adds **cookie-based authentication**, a **live progress bar**, **automatic output files**, and **aggressive scroll + button handling** to capture significantly more comments.
+
+#### Why use the login version?
+
+| | Basic (v1) | **Enhanced (v5)** |
+| --- | --- | --- |
+| Comments captured | ~45-50 | **~76+** (up to 60% more) |
+| Login support | ❌ | ✅ (cookie-based) |
+| Live progress bar | ❌ | ✅ |
+| Auto output file | ❌ | ✅ (`out-DD.HH.MM.json`) |
+| Scroll strategy | 3x fixed | Dynamic (until exhausted) |
+| "Load more" buttons | ❌ | ✅ (auto-click, EN + DE) |
+| Max pages | 15 | 100 (configurable) |
+| Ajax response parsing | ❌ | ✅ (`for (;;);` handling) |
+
+#### Step 1: Login (one-time)
+
+```bash
+python3 threads_scraper_v2.py --login
+```
+
+A browser window opens. Log in to your Threads/Instagram account. Once the `sessionid` cookie is detected, the browser closes and all cookies are saved to `threads_cookies.json`.
+
+#### Step 2: Scrape
+
+```bash
+# Default (max 100 pages)
+python3 threads_scraper_v2.py "https://www.threads.com/@user/post/CODE"
+
+# With custom page limit
+python3 threads_scraper_v2.py "https://www.threads.com/@user/post/CODE" 200
+```
+
+The terminal shows a live progress bar:
+
+```
+  [████████████░░░░░░░░░░░░░░░░░░] 12/100  | Found: 87  | Queue: 23  | Time: 01:34  | threads.net/@user/post/ABC  scrolling...
+```
+
+Results are saved automatically to a timestamped file like `out-25.14.30.json`.
+
+#### Managing your session
+
+```bash
+# Delete saved cookies
+python3 threads_scraper_v2.py --logout
+
+# Show help
+python3 threads_scraper_v2.py --help
+```
+
+> **Tip:** The scraper also works without login — it simply falls back to the limited logged-out view (~50 comments).
 
 
 ## ⚖️ Disclaimer
 
-This tool is for educational and research purposes only. Please respect Meta's Terms of Service and the robots.txt of threads.net. Use this scraper responsibly and do not overwhelm their servers. They also 'll block your IP, if used roge.
+This tool is for educational and research purposes only. Please respect Meta's Terms of Service and the robots.txt of threads.net. Use this scraper responsibly and do not overwhelm their servers. They also 'll block your IP, if used rogue.
