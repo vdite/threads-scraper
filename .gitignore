@@ -1,0 +1,10 @@
+# Session cookies: full account access, never commit
+threads_cookies.json
+
+# Scrape results
+out-*.json
+
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

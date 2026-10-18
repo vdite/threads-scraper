@@ -1,12 +1,34 @@
 import json
 import asyncio
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
+from urllib.parse import urlsplit
 from playwright.async_api import async_playwright
 from parsel import Selector
 from nested_lookup import nested_lookup
 
-def parse_post(post_data: Dict) -> Dict:
+def normalize_url(url: str) -> str:
+    """Canonical post URL: threads.com host, no query string, fragment or trailing slash."""
+    parts = urlsplit(url.strip())
+    host = parts.netloc.lower()
+    if host in ("threads.net", "www.threads.net", "threads.com", "www.threads.com"):
+        host = "www.threads.com"
+    return f"https://{host}{parts.path.rstrip('/')}"
+
+
+def collect_posts(data, extracted_comments: Dict, urls_to_visit: List[str], visited_urls: set):
+    """Stores every post found in a JSON payload and queues posts that have replies."""
+    for post_obj in nested_lookup("post", data):
+        parsed = parse_post(post_obj)
+        if parsed and parsed.get("id"):
+            extracted_comments[parsed["id"]] = parsed
+            if parsed.get("reply_count", 0) > 0 and parsed.get("code"):
+                new_url = f"https://www.threads.com/@{parsed['author']}/post/{parsed['code']}"
+                if new_url not in visited_urls and new_url not in urls_to_visit:
+                    urls_to_visit.append(new_url)
+
+
+def parse_post(post_data: Dict) -> Optional[Dict]:
     """Extracts the data including the 'code' for URL generation."""
     if not isinstance(post_data, dict):
         return None
@@ -27,12 +49,13 @@ def parse_post(post_data: Dict) -> Dict:
             "text": text,
             "author": author,
             "likes": post_data.get("like_count", 0),
-            "reply_count": post_data.get("text_post_app_info", {}).get("direct_reply_count", 0)
+            "reply_count": (post_data.get("text_post_app_info") or {}).get("direct_reply_count") or 0
         }
     except Exception:
         return None
 
 async def scrape_threads_recursive(start_url: str, max_pages: int = 15) -> List[Dict]:
+    start_url = normalize_url(start_url)
     extracted_comments = {}
     urls_to_visit = [start_url]
     visited_urls = set()
@@ -46,17 +69,8 @@ async def scrape_threads_recursive(start_url: str, max_pages: int = 15) -> List[
         async def handle_response(response):
             if "graphql" in response.url:
                 try:
-                    json_data = await response.json()
-                    all_posts = nested_lookup("post", json_data)
-                    for post_obj in all_posts:
-                        parsed = parse_post(post_obj)
-                        if parsed and parsed.get("id"):
-                            extracted_comments[parsed["id"]] = parsed
-                            if parsed.get("reply_count", 0) > 0 and parsed.get("code"):
-                                new_url = f"https://www.threads.net/@{parsed['author']}/post/{parsed['code']}"
-                                if new_url not in visited_urls and new_url not in urls_to_visit:
-                                    urls_to_visit.append(new_url)
-                except:
+                    collect_posts(await response.json(), extracted_comments, urls_to_visit, visited_urls)
+                except Exception:
                     pass
 
         # Bind listener only once to the page
@@ -88,16 +102,7 @@ async def scrape_threads_recursive(start_url: str, max_pages: int = 15) -> List[
                             continue
 
                         data = json.loads(script[start_index:end_index])
-                        all_posts = nested_lookup("post", data)
-
-                        for post_obj in all_posts:
-                            parsed = parse_post(post_obj)
-                            if parsed and parsed.get("id"):
-                                extracted_comments[parsed["id"]] = parsed
-                                if parsed.get("reply_count", 0) > 0 and parsed.get("code"):
-                                    new_url = f"https://www.threads.net/@{parsed['author']}/post/{parsed['code']}"
-                                    if new_url not in visited_urls and new_url not in urls_to_visit:
-                                        urls_to_visit.append(new_url)
+                        collect_posts(data, extracted_comments, urls_to_visit, visited_urls)
                     except (json.JSONDecodeError, AttributeError):
                         continue
 
@@ -106,11 +111,12 @@ async def scrape_threads_recursive(start_url: str, max_pages: int = 15) -> List[
 
         await browser.close()
 
+    print(f"---> Pages visited (incl. sub-comments): {len(visited_urls)}", file=sys.stderr)
     return list(extracted_comments.values())
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Please provide a Threads URL.")
+        print("Usage: python3 threads_scraper.py <threads_url> > out.json", file=sys.stderr)
         sys.exit(1)
 
     url = sys.argv[1]
@@ -118,8 +124,8 @@ if __name__ == "__main__":
     results = asyncio.run(scrape_threads_recursive(url, max_pages=15))
 
     if results:
+        # Only JSON goes to stdout, so `> out.json` produces a valid file.
         print(json.dumps(results, indent=2, ensure_ascii=False))
-        print(f"\n---> Total page calls visited (incl. sub-comments): {min(len(results), 15)}")
-        print(f"---> Total posts/comments found: {len(results)}")
+        print(f"---> Total posts/comments found: {len(results)}", file=sys.stderr)
     else:
-        print("No data could be extracted.")
+        print("No data could be extracted.", file=sys.stderr)

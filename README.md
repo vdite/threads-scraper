@@ -24,7 +24,7 @@ While other tools only see the surface, this scraper dives deep into the discuss
 * **Recursive Deep Scraping:** Automatically follows reply chains to extract the entire conversation.
 * **Playwright Integration:** Uses headless browser automation to handle Meta's dynamic GraphQL loading.
 * **Human-Readable Terminal Output:** Instant feedback with a clean, numbered list of comments.
-* **Data Export:** Saves every scrape as a structured `last_scrape.json` for easy post-processing.
+* **Data Export:** v1 prints structured JSON to stdout (redirect it into a file), v2 saves every scrape to a timestamped `out-YYYY-MM-DD_HH-MM-SS.json`.
 * **Smart Deduplication:** Identifies posts by their unique ID to prevent duplicate entries in your dataset.
 
 ## 🛠 Installation
@@ -37,7 +37,7 @@ cd threads-scraper
 
 2. **Install dependencies:**
 ```bash
-pip install playwright parsel nested-lookup jmespath
+pip install -r requirements.txt
 ```
 
 3. **Setup Playwright:**
@@ -55,10 +55,10 @@ There are two versions of the scraper. Choose the one that fits your needs:
 Start the scraper by providing any Threads URL as a command-line argument:
 
 ```bash
-python3 threads_scraper.py https://www.threads.net/@user/post/CODE
+python3 threads_scraper.py https://www.threads.com/@user/post/CODE > out.json
 ```
 
-Output is printed as JSON to stdout.
+The JSON result is printed to stdout, status messages go to stderr, so the redirect above produces a valid JSON file. Both `threads.net` and `threads.com` URLs work.
 
 > **Note:** Without login, Threads limits the visible comments to roughly 20 top-level threads (~45-50 posts total including sub-replies). The page literally says *"Log in to see more replies."* at the bottom.
 
@@ -70,12 +70,12 @@ This version adds **cookie-based authentication**, a **live progress bar**, **au
 
 #### Why use the login version?
 
-| | Basic (v1) | **Enhanced (v5)** |
+| | Basic (v1) | **Enhanced (v2)** |
 | --- | --- | --- |
 | Comments captured | ~45-50 | **~76+** (up to 60% more) |
 | Login support | ❌ | ✅ (cookie-based) |
 | Live progress bar | ❌ | ✅ |
-| Auto output file | ❌ | ✅ (`out-DD.HH.MM.json`) |
+| Auto output file | ❌ | ✅ (`out-YYYY-MM-DD_HH-MM-SS.json`) |
 | Scroll strategy | 3x fixed | Dynamic (until exhausted) |
 | "Load more" buttons | ❌ | ✅ (auto-click, EN + DE) |
 | Max pages | 15 | 100 (configurable) |
@@ -88,6 +88,8 @@ python3 threads_scraper_v2.py --login
 ```
 
 A browser window opens. Log in to your Threads/Instagram account. Once the `sessionid` cookie is detected, the browser closes and all cookies are saved to `threads_cookies.json`.
+
+> **Security:** This file contains your `sessionid` and grants full access to your Threads/Instagram account. It is created with owner-only permissions and listed in `.gitignore` — never commit or share it.
 
 #### Step 2: Scrape
 
@@ -105,7 +107,7 @@ The terminal shows a live progress bar:
   [████████████░░░░░░░░░░░░░░░░░░] 12/100  | Found: 87  | Queue: 23  | Time: 01:34  | threads.net/@user/post/ABC  scrolling...
 ```
 
-Results are saved automatically to a timestamped file like `out-25.14.30.json`.
+Results are saved automatically to a timestamped file like `out-2026-10-18_14-30-05.json`.
 
 #### Managing your session
 
@@ -122,4 +124,4 @@ python3 threads_scraper_v2.py --help
 
 ## ⚖️ Disclaimer
 
-This tool is for educational and research purposes only. Please respect Meta's Terms of Service and the robots.txt of threads.net. Use this scraper responsibly and do not overwhelm their servers. They also 'll block your IP, if used rogue.
+This tool is for educational and research purposes only. Please respect Meta's Terms of Service and the robots.txt of threads.net. Use this scraper responsibly and do not overwhelm their servers. Excessive use may also get your IP or account blocked.

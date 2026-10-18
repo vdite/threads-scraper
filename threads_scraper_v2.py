@@ -4,15 +4,50 @@ import sys
 import os
 import time
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
+from urllib.parse import urlsplit
 from playwright.async_api import async_playwright
 from parsel import Selector
 from nested_lookup import nested_lookup
 
 COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "threads_cookies.json")
 
+USAGE = """Usage: python3 threads_scraper_v2.py <threads_url> [max_pages]
+       python3 threads_scraper_v2.py --login        (log in and save cookies)
+       python3 threads_scraper_v2.py --logout       (delete saved cookies)
+       python3 threads_scraper_v2.py --help         (show this help)"""
 
-def parse_post(post_data: Dict) -> Dict:
+
+def normalize_url(url: str) -> str:
+    """Canonical post URL: threads.com host, no query string, fragment or trailing slash.
+
+    Threads moved from threads.net to threads.com and share links carry tracking
+    parameters, so the same post can appear under several URLs.
+    """
+    parts = urlsplit(url.strip())
+    host = parts.netloc.lower()
+    if host in ("threads.net", "www.threads.net", "threads.com", "www.threads.com"):
+        host = "www.threads.com"
+    return f"https://{host}{parts.path.rstrip('/')}"
+
+
+def post_url(parsed: Dict) -> str:
+    return f"https://www.threads.com/@{parsed['author']}/post/{parsed['code']}"
+
+
+def collect_posts(data, extracted_comments: Dict, urls_to_visit: List[str], visited_urls: set):
+    """Stores every post found in a JSON payload and queues posts that have replies."""
+    for post_obj in nested_lookup("post", data):
+        parsed = parse_post(post_obj)
+        if parsed and parsed.get("id"):
+            extracted_comments[parsed["id"]] = parsed
+            if parsed.get("reply_count", 0) > 0 and parsed.get("code"):
+                new_url = post_url(parsed)
+                if new_url not in visited_urls and new_url not in urls_to_visit:
+                    urls_to_visit.append(new_url)
+
+
+def parse_post(post_data: Dict) -> Optional[Dict]:
     """Extracts the data including the 'code' for URL generation."""
     if not isinstance(post_data, dict):
         return None
@@ -33,7 +68,7 @@ def parse_post(post_data: Dict) -> Dict:
             "text": text,
             "author": author,
             "likes": post_data.get("like_count", 0),
-            "reply_count": post_data.get("text_post_app_info", {}).get("direct_reply_count", 0),
+            "reply_count": (post_data.get("text_post_app_info") or {}).get("direct_reply_count") or 0,
         }
     except Exception:
         return None
@@ -71,8 +106,12 @@ async def get_scroll_height(page) -> int:
     return await page.evaluate("document.body.scrollHeight")
 
 
-async def scroll_and_expand(page, extracted_comments: Dict, max_stale_rounds: int = 12):
-    """Scrolls and clicks load-more buttons until no new content appears."""
+async def scroll_and_expand(page, extracted_comments: Dict, max_stale_rounds: int = 12, max_rounds: int = 60):
+    """Scrolls and clicks load-more buttons until no new content appears.
+
+    A click alone does not count as progress: a button that stays visible would
+    otherwise keep the loop alive forever. max_rounds is a hard upper bound.
+    """
 
     load_more_selectors = [
         "text=/View more repli/i",
@@ -91,8 +130,10 @@ async def scroll_and_expand(page, extracted_comments: Dict, max_stale_rounds: in
     previous_count = len(extracted_comments)
     previous_scroll_height = await get_scroll_height(page)
     stale_rounds = 0
+    rounds = 0
 
-    while stale_rounds < max_stale_rounds:
+    while stale_rounds < max_stale_rounds and rounds < max_rounds:
+        rounds += 1
         # Scroll down
         await page.mouse.wheel(0, 4000)
         await page.wait_for_timeout(1500)
@@ -103,10 +144,9 @@ async def scroll_and_expand(page, extracted_comments: Dict, max_stale_rounds: in
                 buttons = await page.locator(sel).all()
                 for button in buttons:
                     try:
-                        if await button.is_visible(timeout=500):
+                        if await button.is_visible():
                             await button.click(timeout=2000)
                             await page.wait_for_timeout(2000)
-                            stale_rounds = 0  # reset on successful click
                     except Exception:
                         pass
             except Exception:
@@ -161,8 +201,11 @@ async def do_login(pw):
         print("\n  Timeout waiting for login. Saving whatever cookies exist...", file=sys.stderr)
 
     # Save all cookies (for both .threads.com and .instagram.com)
-    with open(COOKIE_FILE, "w") as f:
+    # The session cookie grants full account access: keep the file private to this user.
+    fd = os.open(COOKIE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(cookies, f, indent=2)
+    os.chmod(COOKIE_FILE, 0o600)
 
     auth_cookies = [c["name"] for c in cookies if c["name"] in ("sessionid", "ds_user_id", "ig_did", "mid")]
     print(f"\n  Cookies saved to: {COOKIE_FILE}", file=sys.stderr)
@@ -173,6 +216,7 @@ async def do_login(pw):
 
 
 async def scrape_threads_recursive(start_url: str, max_pages: int = 100) -> List[Dict]:
+    start_url = normalize_url(start_url)
     extracted_comments = {}
     urls_to_visit = [start_url]
     visited_urls = set()
@@ -200,16 +244,7 @@ async def scrape_threads_recursive(start_url: str, max_pages: int = 100) -> List
             url = response.url
             if any(k in url for k in ["graphql", "api/v1"]):
                 try:
-                    json_data = await response.json()
-                    all_posts = nested_lookup("post", json_data)
-                    for post_obj in all_posts:
-                        parsed = parse_post(post_obj)
-                        if parsed and parsed.get("id"):
-                            extracted_comments[parsed["id"]] = parsed
-                            if parsed.get("reply_count", 0) > 0 and parsed.get("code"):
-                                new_url = f"https://www.threads.net/@{parsed['author']}/post/{parsed['code']}"
-                                if new_url not in visited_urls and new_url not in urls_to_visit:
-                                    urls_to_visit.append(new_url)
+                    collect_posts(await response.json(), extracted_comments, urls_to_visit, visited_urls)
                 except Exception:
                     pass
 
@@ -219,16 +254,7 @@ async def scrape_threads_recursive(start_url: str, max_pages: int = 100) -> List
                     text = await response.text()
                     if text.startswith("for (;;);"):
                         text = text[len("for (;;);"):]
-                    data = json.loads(text)
-                    all_posts = nested_lookup("post", data)
-                    for post_obj in all_posts:
-                        parsed = parse_post(post_obj)
-                        if parsed and parsed.get("id"):
-                            extracted_comments[parsed["id"]] = parsed
-                            if parsed.get("reply_count", 0) > 0 and parsed.get("code"):
-                                new_url = f"https://www.threads.net/@{parsed['author']}/post/{parsed['code']}"
-                                if new_url not in visited_urls and new_url not in urls_to_visit:
-                                    urls_to_visit.append(new_url)
+                    collect_posts(json.loads(text), extracted_comments, urls_to_visit, visited_urls)
                 except Exception:
                     pass
 
@@ -261,16 +287,7 @@ async def scrape_threads_recursive(start_url: str, max_pages: int = 100) -> List
                             continue
 
                         data = json.loads(script[start_index:end_index])
-                        all_posts = nested_lookup("post", data)
-
-                        for post_obj in all_posts:
-                            parsed = parse_post(post_obj)
-                            if parsed and parsed.get("id"):
-                                extracted_comments[parsed["id"]] = parsed
-                                if parsed.get("reply_count", 0) > 0 and parsed.get("code"):
-                                    new_url = f"https://www.threads.net/@{parsed['author']}/post/{parsed['code']}"
-                                    if new_url not in visited_urls and new_url not in urls_to_visit:
-                                        urls_to_visit.append(new_url)
+                        collect_posts(data, extracted_comments, urls_to_visit, visited_urls)
                     except (json.JSONDecodeError, AttributeError):
                         continue
 
@@ -293,19 +310,34 @@ async def scrape_threads_recursive(start_url: str, max_pages: int = 100) -> List
     return list(extracted_comments.values())
 
 
-async def main():
-    if len(sys.argv) < 2 or sys.argv[1] == "--help":
-        print("Usage: python threads_scraper5.py <threads_url> [max_pages]")
-        print("       python threads_scraper5.py --login        (log in and save cookies)")
-        print("       python threads_scraper5.py --logout       (delete saved cookies)")
-        sys.exit(1)
+def write_results(results: List[Dict]):
+    if not results:
+        print("No data could be extracted.", file=sys.stderr)
+        return
+    # Full date and seconds: runs on different days/months or within one minute must not overwrite each other.
+    filename = f"out-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    print(f"\n  Output written to: {filename}", file=sys.stderr)
+    print(f"  Total posts/comments: {len(results)}\n", file=sys.stderr)
 
-    if sys.argv[1] == "--login":
-        async with async_playwright() as pw:
-            await do_login(pw)
+
+async def login():
+    async with async_playwright() as pw:
+        await do_login(pw)
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("--help", "-h"):
+        print(USAGE)
+        sys.exit(0 if args else 1)
+
+    if args[0] == "--login":
+        asyncio.run(login())
         return
 
-    if sys.argv[1] == "--logout":
+    if args[0] == "--logout":
         if os.path.exists(COOKIE_FILE):
             os.remove(COOKIE_FILE)
             print("Cookies deleted.")
@@ -313,50 +345,22 @@ async def main():
             print("No cookies found.")
         return
 
-    url = sys.argv[1]
-    max_pg = int(sys.argv[2]) if len(sys.argv) > 2 else 100
+    if args[0].startswith("-"):
+        print(f"Unknown option: {args[0]}\n\n{USAGE}", file=sys.stderr)
+        sys.exit(1)
 
-    results = asyncio.run(scrape_threads_recursive(url, max_pages=max_pg))
+    max_pages = 100
+    if len(args) > 1:
+        try:
+            max_pages = int(args[1])
+        except ValueError:
+            max_pages = 0
+        if max_pages < 1:
+            print(f"max_pages must be a positive number, got: {args[1]}", file=sys.stderr)
+            sys.exit(1)
 
-    if results:
-        now = datetime.now()
-        filename = f"out-{now.strftime('%d.%H.%M')}.json"
-
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
-
-        print(f"\n  Output written to: {filename}", file=sys.stderr)
-        print(f"  Total posts/comments: {len(results)}\n", file=sys.stderr)
-    else:
-        print("No data could be extracted.", file=sys.stderr)
+    write_results(asyncio.run(scrape_threads_recursive(args[0], max_pages=max_pages)))
 
 
 if __name__ == "__main__":
-    # --login uses its own async context, everything else goes through main()
-    if len(sys.argv) > 1 and sys.argv[1] == "--login":
-        asyncio.run(main())
-    elif len(sys.argv) > 1 and sys.argv[1] == "--logout":
-        asyncio.run(main())
-    else:
-        main_url = sys.argv[1] if len(sys.argv) > 1 else None
-        max_pages = int(sys.argv[2]) if len(sys.argv) > 2 else 100
-
-        if not main_url:
-            print("Usage: python threads_scraper5.py <threads_url> [max_pages]")
-            print("       python threads_scraper5.py --login")
-            print("       python threads_scraper5.py --logout")
-            sys.exit(1)
-
-        results = asyncio.run(scrape_threads_recursive(main_url, max_pages=max_pages))
-
-        if results:
-            now = datetime.now()
-            filename = f"out-{now.strftime('%d.%H.%M')}.json"
-
-            with open(filename, "w", encoding="utf-8") as f:
-                json.dump(results, f, indent=2, ensure_ascii=False)
-
-            print(f"\n  Output written to: {filename}", file=sys.stderr)
-            print(f"  Total posts/comments: {len(results)}\n", file=sys.stderr)
-        else:
-            print("No data could be extracted.", file=sys.stderr)
+    main()
